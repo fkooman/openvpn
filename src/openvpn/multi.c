@@ -90,6 +90,151 @@ update_mstat_n_clients(const int n_clients)
 #endif
 }
 
+/* src MUST be 0 terminated */
+static inline char* json_escape(const char *src)
+{
+    int j = 0;
+
+    char *dst = malloc(2 * strlen(src) + 1);
+    assert(dst);
+
+    for (int i = 0; src[i] != '\0'; i++) {
+        switch (src[i]) {
+        case '\"':
+            dst[j++] = '\\';
+            dst[j++] = '\"';
+            break;
+        case '\\':
+            dst[j++] = '\\';
+            dst[j++] = '\\';
+            break;
+        case '\n':
+            dst[j++] = '\\';
+            dst[j++] = 'n';
+            break;
+        case '\r':
+            dst[j++] = '\\';
+            dst[j++] = 'r';
+            break;
+        case '\t':
+            dst[j++] = '\\';
+            dst[j++] = 't';
+            break;
+        default:
+            dst[j++] = src[i];
+            break;
+        }
+    }
+
+    dst[j] = '\0';
+
+    return dst;
+}
+
+static inline char* json_obj_client_list(
+    const char *common_name,
+    const char *real_address,
+    const char *virtual_address,
+    const char *virtual_ipv6_address,
+    counter_type bytes_received,
+    counter_type bytes_sent,
+    const char* connected_since,
+    const time_t connected_since_time_t,
+    const char* username,
+#ifdef MANAGEMENT_DEF_AUTH
+    const long unsigned int client_id,
+#endif
+    const unsigned int peer_id
+) {
+    char* escaped_common_name = json_escape(common_name);
+    char* escaped_real_address = json_escape(real_address);
+    char* escaped_virtual_address = json_escape(virtual_address);
+    char* escaped_virtual_ipv6_address = json_escape(virtual_ipv6_address);
+    char* escaped_connected_since = json_escape(connected_since);
+    char* escaped_username = json_escape(username);
+
+    char* json_obj_str = NULL;
+    asprintf(
+        &json_obj_str,
+        "{\n"
+            "\t\"Common Name\": \"%s\",\n"
+            "\t\"Real Address\": \"%s\",\n"
+            "\t\"Virtual Address\": \"%s\",\n"
+            "\t\"Virtual IPv6 Address\": \"%s\",\n"
+            "\t\"Bytes Received\": %" counter_format ",\n"
+            "\t\"Bytes Sent\": %" counter_format "\n"
+            "\t\"Connected Since\": \"%s\",\n"
+            "\t\"Connected Since (time_t)\": %u,\n"
+            "\t\"Username\": \"%s\",\n"
+#ifdef MANAGEMENT_DEF_AUTH
+            "\t\"Client ID\": %lu,\n"
+#endif
+            "\t\"Peer ID\": %" PRIu32 "\n"
+        "}\n",
+        escaped_common_name,
+        escaped_real_address,
+        escaped_virtual_address,
+        escaped_virtual_ipv6_address,
+        bytes_received,
+        bytes_sent,
+        escaped_connected_since,
+        connected_since_time_t,
+        escaped_username,
+        client_id,
+        peer_id
+    );
+
+    free(escaped_username);
+    free(escaped_connected_since);
+    free(escaped_virtual_ipv6_address);
+    free(escaped_virtual_address);
+    free(escaped_real_address);
+    free(escaped_common_name);
+
+    return json_obj_str;
+}
+
+static inline char* json_obj_routing_table(
+    const char* virtual_address,
+    const char* flags,
+    const char* common_name,
+    const char* real_address,
+    const char* last_ref,
+    const time_t last_ref_time_t
+) {
+    char *escaped_virtual_address = json_escape(virtual_address);
+    char *escaped_flags = json_escape(flags);
+    char *escaped_common_name = json_escape(common_name);
+    char *escaped_real_address = json_escape(real_address);
+    char *escaped_last_ref = json_escape(last_ref);
+
+    char* json_obj_str = NULL;
+    asprintf(
+        &json_obj_str,
+        "{\n"
+            "\t\"Virtual Address\": \"%s%s\",\n"
+            "\t\"Common Name\": \"%s\",\n"
+            "\t\"Real Address\": \"%s\",\n"
+            "\t\"Last Ref\": \"%s\",\n"
+            "\t\"Last Ref (time_t)\": %u\n"
+        "}\n",
+        escaped_virtual_address,
+        escaped_flags,
+        escaped_common_name,
+        escaped_real_address,
+        escaped_last_ref,
+        last_ref_time_t
+    );
+
+    free(escaped_last_ref);
+    free(escaped_real_address);
+    free(escaped_common_name);
+    free(escaped_flags);
+    free(escaped_virtual_address);
+
+    return json_obj_str;
+}
+
 static bool
 learn_address_script(const struct multi_context *m,
                      const struct multi_instance *mi,
@@ -1019,11 +1164,14 @@ multi_print_status(struct multi_context *m, struct status_output *so, const int 
             /*
              * Status file version 4 (JSON)
              */
+
+            char* json_obj_str = NULL;
+
             status_printf(so, "{");
             status_printf(so, "\"TITLE\": \"%s\",", title_string);
             status_printf(so, "\"TIME\": \"%s\",", time_string(now, 0, false, &gc_top));
-            /* UNIX_TIME added here instead of making it part of TIME as well
-               as in status 2/3 */
+            /* UNIX_TIME added here instead of making it part of TIME
+               as is done in status 2/3 */
             status_printf(so, "\"UNIX_TIME\": %u,", (unsigned int)now);
             status_printf(so, "\"CLIENT_LIST\": [");
 
@@ -1040,26 +1188,31 @@ multi_print_status(struct multi_context *m, struct status_output *so, const int 
 
                 if (!mi->halt)
                 {
+
                     if(0 == is_first) {
                         status_printf(so, ",");
                     } else {
                         is_first = 0;
                     }
-                    status_printf(so, "{");
-                    status_printf(so, "\"Common Name\": \"%s\",", tls_common_name(mi->context.c2.tls_multi, false));
-                    status_printf(so, "\"Real Address\": \"%s\",", mroute_addr_print(&mi->real, &gc));
-                    status_printf(so, "\"Virtual Address\": \"%s\",", print_in_addr_t(mi->reporting_addr, IA_EMPTY_IF_UNDEF, &gc));
-                    status_printf(so, "\"Virtual IPv6 Address\": \"%s\",", print_in6_addr(mi->reporting_addr_ipv6, IA_EMPTY_IF_UNDEF, &gc));
-                    status_printf(so, "\"Bytes Received\": " counter_format ",", mi->context.c2.link_read_bytes);
-                    status_printf(so, "\"Bytes Sent\": " counter_format ",", mi->context.c2.link_write_bytes);
-                    status_printf(so, "\"Connected Since\": \"%s\",", time_string(mi->created, 0, false, &gc));
-                    status_printf(so, "\"Connected Since (time_t)\": %u,", (unsigned int)mi->created);
-                    status_printf(so, "\"Username\": \"%s\",", tls_username(mi->context.c2.tls_multi, false));
+
+                    json_obj_str = json_obj_client_list(
+                        tls_common_name(mi->context.c2.tls_multi, false),
+                        mroute_addr_print(&mi->real, &gc),
+                        print_in_addr_t(mi->reporting_addr, IA_EMPTY_IF_UNDEF, &gc),
+                        print_in6_addr(mi->reporting_addr_ipv6, IA_EMPTY_IF_UNDEF, &gc),
+                        mi->context.c2.link_read_bytes,
+                        mi->context.c2.link_write_bytes,
+                        time_string(mi->created, 0, false, &gc),
+                        (unsigned int)mi->created,
+                        tls_username(mi->context.c2.tls_multi, false),
 #ifdef MANAGEMENT_DEF_AUTH
-                    status_printf(so, "\"Client ID\": %lu,", mi->context.c2.mda_context.cid);
+                        mi->context.c2.mda_context.cid,
 #endif
-                    status_printf(so, "\"Peer ID\": %" PRIu32, mi->context.c2.tls_multi ? mi->context.c2.tls_multi->peer_id : UINT32_MAX);
-                    status_printf(so, "}");
+                        mi->context.c2.tls_multi ? mi->context.c2.tls_multi->peer_id : UINT32_MAX
+                    );
+
+                    status_printf(so, json_obj_str);
+                    free(json_obj_str);
                 }
                 gc_free(&gc);
             }
@@ -1085,16 +1238,23 @@ multi_print_status(struct multi_context *m, struct status_output *so, const int 
                     {
                         flags[0] = 'C';
                     }
-                        if(0 == is_first) {
-                            status_printf(so, ",");
-                        } else {
-                            is_first = 0;
-                        }
-                        status_printf(so, "{\"Virtual Address\": \"%s%s\",", mroute_addr_print(ma, &gc), flags);
-                        status_printf(so, "\"Common Name\": \"%s\",", tls_common_name(mi->context.c2.tls_multi, false));
-                        status_printf(so, "\"Real Address\": \"%s\",", mroute_addr_print(&mi->real, &gc));
-                        status_printf(so, "\"Last Ref\": \"%s\",", time_string(route->last_reference, 0, false, &gc));
-                        status_printf(so, "\"Last Ref (time_t)\": %u}", (unsigned int)route->last_reference);
+
+                    if(0 == is_first) {
+                        status_printf(so, ",");
+                    } else {
+                        is_first = 0;
+                    }
+
+                    json_obj_str = json_obj_routing_table(
+                        mroute_addr_print(ma, &gc),
+                        flags,
+                        tls_common_name(mi->context.c2.tls_multi, false),
+                        mroute_addr_print(&mi->real, &gc),
+                        time_string(route->last_reference, 0, false, &gc),
+                        (unsigned int)route->last_reference
+                    );
+                    status_printf(so, json_obj_str);
+                    free(json_obj_str);
                 }
                 gc_free(&gc);
             }
